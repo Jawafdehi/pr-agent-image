@@ -3,6 +3,14 @@
 # own image (never an unvetted upstream :latest) because the resulting container
 # holds our GitHub App private key. arm64-only: the pod is pinned to the OCI Ampere
 # pool. Bump ref/tag deliberately after re-vetting.
+#
+# We carry ONE deliberate patch on top of upstream: upstream ships the
+# `/review auto_approve` dispatch commented-out (see pr_reviewer.run), so a stock
+# build cannot post an approving review. We want jawafdehi-pr-agent to leave an
+# advisory APPROVE on PRs (it does NOT count toward the branch ruleset — GitHub
+# discards Bot/App approvals — it is a visible signal only). The patch step below
+# un-comments exactly that 4-line block and FAILS the build if the marker ever
+# moves, so a future ref bump can never silently ship a non-approving image.
 name: build-pr-agent-image
 on:
   workflow_dispatch:
@@ -12,7 +20,7 @@ on:
         default: "8e4d32e5497defd43c023a404f73560c62728961"
       tag:
         description: image tag to publish
-        default: "v0.39.0"
+        default: "v0.39.0-approve1"
 env:
   IMAGE: jawafdehi/pr-agent
 jobs:
@@ -24,6 +32,30 @@ jobs:
         with:
           repository: The-PR-Agent/pr-agent
           ref: ${{ github.event.inputs.ref }}
+      - name: Patch — enable the /review auto_approve dispatch
+        run: |
+          python - <<'PY'
+          import re, sys, pathlib
+          p = pathlib.Path("pr_agent/tools/pr_reviewer.py")
+          src = p.read_text().splitlines(keepends=True)
+          out, i, patched = [], 0, False
+          while i < len(src):
+              line = src[i]
+              if "self.args[0] == 'auto_approve'" in line and line.lstrip().startswith("#"):
+                  for j in range(4):  # if / info / auto_approve_logic() / return None
+                      out.append(re.sub(r'^(\s*)#\s?', r'\1', src[i + j], count=1))
+                  i += 4
+                  patched = True
+                  continue
+              out.append(line)
+              i += 1
+          if not patched:
+              sys.exit("PATCH FAILED: '/review auto_approve' dispatch marker not found — upstream moved it; re-vet before building.")
+          p.write_text("".join(out))
+          print("Patched. Dispatch block now:")
+          PY
+          echo '--- context (grep) ---'
+          grep -n "auto_approve" pr_agent/tools/pr_reviewer.py | head
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - name: Log into Docker Hub
